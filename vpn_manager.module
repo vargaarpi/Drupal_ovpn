@@ -114,7 +114,7 @@ function vpn_manager_entity_update(EntityInterface $entity) {
       $langcode = \Drupal::currentUser()->getPreferredLangcode();
       
       $params = [
-        'subject' => 'VPN Hozzáférés Elkészült - ' . $org_name,
+        'subject' => 'VPN Hozzáférés elkészült - ' . $org_name,
         'node_title' => $entity->label(),
         'org_name' => $org_name,
         'qr_uri' => $qr_uri,
@@ -174,12 +174,12 @@ function vpn_manager_mail($key, &$message, $params) {
         <strong>3. lépés:</strong> Indítsa el az OpenVPN klienst és csatlakozzon!
       </p>
       <p>
-        Privát kulcsának jelszava: {$params['privkeypass']} amelyet megjegyeztethet, flehasználóneve: {$params['username']}, jelszava pedig az igényléskor Ön által megadott PIN kód, valamint utánaírva folyamatosan az autentikátoralkalmazás által bemutatott 6 jegyű számsor.
+        Privát kulcsának jelszava: {$params['privkeypass']} amelyet megjegyeztethet,<br />felhasználóneve: {$params['username']}<br />jelszava pedig az igényléskor Ön által megadott PIN kód, valamint utánaírva folyamatosan az autentikátoralkalmazás által bemutatott 6 jegyű számsor.
       </p>
 
-      <p><img src='cid:{$params['qr_filename']}' alt='QR Kód' style='width: 250px; height: auto;' /></p>
+      <p><img src='cid:{$params['qr_filename']}' alt='QR Kód' /></p>
       
-      <p>Üdvözlettel,<br>FLEXBIT IT Support</p>
+      <p>Üdvözlettel,<br />FLEXBIT IT Support</p>
     ";
 
     $message['body'][] = Markup::create($body);
