@@ -1,0 +1,9 @@
+name: 'VPN Manager'
+type: module
+description: 'Kezeli az OVPN fájlok feltöltését, QR kódot generál és értesítő emailt küld.'
+core_version_requirement: ^10
+package: Custom
+dependencies:
+  - drupal:node
+  - drupal:file
+  - drupal:system
