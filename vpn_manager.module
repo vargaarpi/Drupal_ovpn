@@ -9,11 +9,49 @@ use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Access\AccessResult;
 use Drupal\Core\Field\FieldItemListInterface;
 
+/**
+ * Implements hook_entity_presave().
+ * AUTOMATIKUS ADATGENERÁLÁS (Base32 + Jelszó)
+ * Ez fut le legelőször, amikor a felhasználó rányom a mentésre.
+ */
+function vpn_manager_entity_presave(EntityInterface $entity) {
+  // Csak a megfelelő tartalomtípusnál fusson
+  if ($entity->getEntityTypeId() !== 'node' || $entity->bundle() !== 'felhasznalok_kulcsai') {
+    return;
+  }
 
+  // Csak új tartalom létrehozásakor (módosításkor ne írja felül a meglévőket)
+  if ($entity->isNew()) {
+    
+    // 1. BASE32 Kód generálása (ha még nincs kitöltve)
+    if ($entity->hasField('field_base32_kod') && $entity->get('field_base32_kod')->isEmpty()) {
+       $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+       $base32_string = '';
+       for ($i = 0; $i < 24; $i++) {
+         $base32_string .= $alphabet[random_int(0, strlen($alphabet) - 1)];
+       }
+       $entity->set('field_base32_kod', $base32_string);
+    }
+
+    // 2. PRIVÁT KULCS JELSZÓ generálása (ha még nincs kitöltve)
+    // Követelmény: 12 karakter, kis-nagybetű, szám, jel.
+    if ($entity->hasField('field_privat_kulcs_jelszava') && $entity->get('field_privat_kulcs_jelszava')->isEmpty()) {
+       // Karakterkészlet összeállítása
+       $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*+?';
+       $password = '';
+       
+       for ($i = 0; $i < 12; $i++) {
+         $password .= $chars[random_int(0, strlen($chars) - 1)];
+       }
+       
+       $entity->set('field_privat_kulcs_jelszava', $password);
+    }
+  }
+}
 
 /**
  * Implements hook_entity_update().
- * Figyeli a feltöltést, generál és emailt küld.
+ * Figyeli a feltöltést (OVPN), generál QR kódot és emailt küld a Usernek.
  */
 function vpn_manager_entity_update(EntityInterface $entity) {
 
@@ -23,10 +61,10 @@ function vpn_manager_entity_update(EntityInterface $entity) {
   }
 
   // --- MEZŐNEVEK ---
-  $field_ovpn   = 'field_ovpn_kulcs';
-  $field_secret = 'field_base32_kod';
-  $field_email  = 'field_e_mail_cim';
-  $field_org    = 'field_szervezet';
+  $field_ovpn     = 'field_ovpn_kulcs';
+  $field_secret   = 'field_base32_kod';
+  $field_email    = 'field_e_mail_cim';
+  $field_org      = 'field_szervezet';
   $field_username = 'field_felhasznalonev';
   $field_privkeypass = 'field_privat_kulcs_jelszava';
   // ----------------
@@ -46,11 +84,12 @@ function vpn_manager_entity_update(EntityInterface $entity) {
   if ($was_empty && $is_populated) {
     
     try {
-// --- ADATOK KINYERÉSE (Javított Szervezet név kezelés) ---
+      // --- ADATOK KINYERÉSE ---
       $secret = $entity->get($field_secret)->getString();
       $email = $entity->get($field_email)->getString();
-      $username = $entity->get($field_username)->getString();
-      $privkeypass =  $entity->get($field_privkeypass)->getString();
+      // Ellenőrzés, hogy léteznek-e a mezők, mielőtt lekérjük
+      $username = $entity->hasField($field_username) ? $entity->get($field_username)->getString() : '';
+      $privkeypass = $entity->hasField($field_privkeypass) ? $entity->get($field_privkeypass)->getString() : '';
       
       $org_name = 'VPN Portal'; // Alapértelmezés
 
@@ -59,19 +98,14 @@ function vpn_manager_entity_update(EntityInterface $entity) {
          $field_type = $field_def->getType();
          
          if ($field_type == 'entity_reference') {
-             // Ha Taxonómia vagy más tartalom hivatkozás
              $org_name = $entity->get($field_org)->entity->label();
          } 
          elseif ($field_type == 'list_string') {
-             // HA LISTA MEZŐ (Ez a kulcs a problémádhoz!)
-             // Lekérjük a lehetséges értékeket, és abból keressük ki a Címkét a Kulcs alapján
              $allowed_values = $entity->get($field_org)->getSetting('allowed_values');
              $raw_value = $entity->get($field_org)->getString();
-             // Ha megvan a listában, akkor a szép nevét használjuk, ha nincs, marad a nyers
              $org_name = $allowed_values[$raw_value] ?? $raw_value;
          } 
          else {
-             // Sima szöveges mező
              $org_name = $entity->get($field_org)->getString();
          }
       }
@@ -81,15 +115,10 @@ function vpn_manager_entity_update(EntityInterface $entity) {
       $file = $entity->get($field_ovpn)->entity;
       $ovpn_file_path = $file->getFileUri(); 
 
-      // 3. QR Kód Generálás (Javított megjelenítés)
-      // A felhasználó kérése: Csak a Szervezet neve jelenjen meg, email nélkül.
-      // Formátum: otpauth://totp/Cimke?secret=XXX&issuer=Kibocsato
-      
-      // A 'rawurlencode' a szóközt %20-ra cseréli, amit a Google Auth szépen " "-nek ír ki.
-      // NEM használunk aláhúzást.
+      // 3. QR Kód Generálás
       $otp_url = sprintf(
         'otpauth://totp/%s?secret=%s',
-        rawurlencode($org_name), // Címke (Label): Ez jelenik meg nagy betűvel
+        rawurlencode($org_name), // Címke (Label)
         $secret
       );
 
@@ -106,7 +135,7 @@ function vpn_manager_entity_update(EntityInterface $entity) {
       
       $result->saveToFile($file_system->realpath($qr_uri));
       
-      // 4. Email küldése
+      // 4. Email küldése a Usernek
       $mailManager = \Drupal::service('plugin.manager.mail');
       $module = 'vpn_manager';
       $key = 'vpn_access_ready';
@@ -155,7 +184,7 @@ function vpn_manager_entity_update(EntityInterface $entity) {
  */
 function vpn_manager_mail($key, &$message, $params) {
   
-  // 1. ESET: Amikor elkészül a kulcs (QR kódos levél)
+  // 1. ESET: Amikor elkészül a kulcs (QR kódos levél a Usernek)
   if ($key === 'vpn_access_ready') {
     $message['subject'] = $params['subject'];
     
@@ -168,14 +197,19 @@ function vpn_manager_mail($key, &$message, $params) {
       </p>
 
       <p>
-        <strong>2. lépés:</strong> Olvassa be a csatolt QR kódot a hitelesítő alkalmazásával:
+        <strong>2. lépés:</strong> Olvassa be a lenti QR kódot a hitelesítő alkalmazásával:
       </p>
       <p>
         <strong>3. lépés:</strong> Indítsa el az OpenVPN klienst és csatlakozzon!
       </p>
-      <p>
-        Privát kulcsának jelszava: {$params['privkeypass']} amelyet megjegyeztethet,<br />felhasználóneve: {$params['username']}<br />jelszava pedig az igényléskor Ön által megadott PIN kód, valamint utánaírva folyamatosan az autentikátoralkalmazás által bemutatott 6 jegyű számsor.
-      </p>
+      <div style='background-color: #f9f9f9; padding: 15px; border: 1px solid #ddd; margin: 15px 0;'>
+        <p><strong>Hitelesítési adatok:</strong></p>
+        <ul>
+            <li><strong>Felhasználónév:</strong> {$params['username']}</li>
+            <li><strong>Privát kulcs jelszava:</strong> {$params['privkeypass']} (Ezt a jelszót célszerű elmenteni az OpenVPN Connect alkalmazásban.)</li>
+            <li><strong>Jelszó (One Time Password):</strong> Az Ön PIN kódja + a 6 jegyű kód a hitelesítő alkalmazásból (egybeírva).</li>
+        </ul>
+      </div>
 
       <p><img src='cid:{$params['qr_filename']}' alt='QR Kód' /></p>
       
@@ -203,12 +237,10 @@ function vpn_manager_mail($key, &$message, $params) {
     $message['body'][] = Markup::create($body);
   }
 
-  // 3. ESET: Felhasználói visszaigazolás (EZ AZ ÚJ KÉRÉS)
+  // 3. ESET: Felhasználói visszaigazolás (Igénylés beküldésekor)
   elseif ($key === 'vpn_request_acknowledgement') {
     $message['subject'] = $params['subject'];
 
-    // A kért szöveg beillesztése
-    // Javítottam egy elírást: "lektronikus" -> "elektronikus"
     $body = "
       <p>Tisztelt {$params['node_title']}!</p>
       
@@ -230,32 +262,21 @@ function vpn_manager_mail($key, &$message, $params) {
  */
 function vpn_manager_cron() {
   $file_system = \Drupal::service('file_system');
-  
-  // A public mappa fizikai elérése
   $directory = $file_system->realpath('public://');
   
-  // Ha valamiért nem érhető el a mappa, kilépünk
   if (!is_dir($directory)) {
     return;
   }
 
-  // Megkeressük az összes "qr_auth_" kezdetű .png fájlt
   $files = glob($directory . '/qr_auth_*.png');
-  
-  // Jelenlegi idő
   $now = time();
-  // Türelmi idő: 24 óra (86400 másodperc)
-  // Csak az ennél régebbi fájlokat töröljük, hátha valaki épp most nyitja meg a levelet.
   $expire_time = 86400; 
-
   $deleted_count = 0;
 
   if ($files) {
     foreach ($files as $file) {
       if (is_file($file)) {
-        // Megnézzük, mikor módosult utoljára a fájl
         if ($now - filemtime($file) >= $expire_time) {
-          // Törlés
           unlink($file);
           $deleted_count++;
         }
@@ -263,7 +284,6 @@ function vpn_manager_cron() {
     }
   }
 
-  // Ha töröltünk valamit, beírjuk a logba (hogy tudd, hogy működik a takarítás)
   if ($deleted_count > 0) {
     \Drupal::logger('vpn_manager')->notice('CRON karbantartás: @count db régi QR kód törölve.', ['@count' => $deleted_count]);
   }
@@ -276,32 +296,22 @@ function vpn_manager_cron() {
  */
 function vpn_manager_entity_field_access($operation, FieldDefinitionInterface $field_definition, AccountInterface $account, FieldItemListInterface $items = NULL) {
   
-  // A védendő mezők listája
   $protected_fields = [
     'field_base32_kod', 
     'field_ovpn_kulcs',
     'field_privat_kulcs_jelszava',
     'field_felhasznalonev',
-    // 'field_szervezet' // Ezt csak akkor tedd be, ha ezt se írhatja át a user
   ];
 
-  // Megnézzük, hogy az aktuális mező a védett listában van-e
   if (in_array($field_definition->getName(), $protected_fields)) {
-    
-    // SZERKESZTÉS (Edit) jog ellenőrzése
     if ($operation === 'edit') {
-      // Ha a felhasználó rendelkezik az 'administrator' szerepkörrel, mindent szabad
       if (in_array('administrator', $account->getRoles())) {
         return AccessResult::allowed();
       }
-      
-      // Mindenki másnak (beleértve a tulajdonost is) TILTOTT a szerkesztés
-      // Így a user nem tudja felülírni a generált kódot vagy a feltöltött fájlt.
       return AccessResult::forbidden();
     }
   }
 
-  // Minden más esetben az alapértelmezett Drupal jogok érvényesek
   return AccessResult::neutral();
 }
 
@@ -310,10 +320,8 @@ function vpn_manager_entity_field_access($operation, FieldDefinitionInterface $f
  * Implements hook_entity_insert().
  * Értesítések küldése új tartalom (igénylés) létrehozásakor.
  */
-
-
 function vpn_manager_entity_insert(EntityInterface $entity) {
-  // 1. Csak a 'felhasznalok_kulcsai' típusnál fusson
+  // Csak a 'felhasznalok_kulcsai' típusnál fusson
   if ($entity->getEntityTypeId() !== 'node' || $entity->bundle() !== 'felhasznalok_kulcsai') {
     return;
   }
@@ -323,7 +331,7 @@ function vpn_manager_entity_insert(EntityInterface $entity) {
   $langcode = \Drupal::currentUser()->getPreferredLangcode();
 
   // --- A) ÉRTESÍTÉS AZ ADMINNAK ---
-  $admin_email = 'varga.arpad@flexbit.hu'; // <--- IDE ÍRD BE A SAJÁT ADMIN CÍMEDET!
+  $admin_email = 'varga.arpad@flexbit.hu'; 
   
   $params_admin = [
     'subject' => 'Új VPN Igénylés érkezett: ' . $entity->label(),
@@ -332,7 +340,6 @@ function vpn_manager_entity_insert(EntityInterface $entity) {
     'org_name' => 'N/A'
   ];
 
-  // Szervezet nevének kinyerése az admin levélhez
   if ($entity->hasField('field_szervezet') && !$entity->get('field_szervezet')->isEmpty()) {
      $org_val = $entity->get('field_szervezet');
      if (isset($org_val->first()->getValue()['target_id'])) {
@@ -342,20 +349,18 @@ function vpn_manager_entity_insert(EntityInterface $entity) {
      }
   }
 
-  // Admin levél küldése
   $mailManager->mail($module, 'new_vpn_request', $admin_email, $langcode, $params_admin, NULL, TRUE);
 
 
-  // --- B) VISSZAIGAZOLÁS AZ IGÉNYLŐNEK (ÚJ RÉSZ) ---
+  // --- B) VISSZAIGAZOLÁS AZ IGÉNYLŐNEK ---
   if ($entity->hasField('field_e_mail_cim') && !$entity->get('field_e_mail_cim')->isEmpty()) {
     $user_email = $entity->get('field_e_mail_cim')->getString();
     
     $params_user = [
-      'subject' => 'VPN Igénylés Visszaigazolása', // A levél tárgya
-      'node_title' => $entity->label(),            // A felhasználó neve (cím)
+      'subject' => 'VPN Igénylés Visszaigazolása', 
+      'node_title' => $entity->label(),           
     ];
 
-    // Felhasználói levél küldése
     $result = $mailManager->mail($module, 'vpn_request_acknowledgement', $user_email, $langcode, $params_user, NULL, TRUE);
     
     if ($result['result'] !== TRUE) {
@@ -363,5 +368,3 @@ function vpn_manager_entity_insert(EntityInterface $entity) {
     }
   }
 }
-
-
